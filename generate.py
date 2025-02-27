@@ -11,8 +11,11 @@ def add_gumbel_noise(logits, temperature):
     According to arXiv:2409.02908, for MDM, low-precision Gumbel Max improves perplexity score but reduces generation quality.
     Thus, we use float64.
     '''
-    logits = logits.to(torch.float64)
-    noise = torch.rand_like(logits, dtype=torch.float64)
+    dtype = torch.float64
+    if logits.device.type == 'mps':
+        dtype = torch.float32
+    logits = logits.to(dtype)
+    noise = torch.rand_like(logits, dtype=dtype)
     gumbel_noise = (- torch.log(noise)) ** temperature
     return logits.exp() / gumbel_noise
 
@@ -39,7 +42,7 @@ def get_num_transfer_tokens(mask_index, steps):
 
 
 @ torch.no_grad()
-def generate(model, prompt, steps=128, gen_length=128, block_length=128, temperature=0.,
+def generate(model, prompt, tokenizer, steps=128, gen_length=128, block_length=128, temperature=0.,
              cfg_scale=0., remasking='low_confidence', mask_id=126336):
     '''
     Args:
@@ -65,6 +68,7 @@ def generate(model, prompt, steps=128, gen_length=128, block_length=128, tempera
     steps = steps // num_blocks
 
     for num_block in range(num_blocks):
+        print("At block", num_block)
         block_mask_index = (x[:, prompt.shape[1] + num_block * block_length: prompt.shape[1] + (num_block + 1) * block_length:] == mask_id)
         num_transfer_tokens = get_num_transfer_tokens(block_mask_index, steps)
         for i in range(steps):
@@ -83,7 +87,10 @@ def generate(model, prompt, steps=128, gen_length=128, block_length=128, tempera
             x0 = torch.argmax(logits_with_noise, dim=-1) # b, l
 
             if remasking == 'low_confidence':
-                p = F.softmax(logits.to(torch.float64), dim=-1)
+                dtype = torch.float64
+                if logits.device.type == 'mps':
+                    dtype = torch.float32
+                p = F.softmax(logits.to(dtype), dim=-1)
                 x0_p = torch.squeeze(
                     torch.gather(p, dim=-1, index=torch.unsqueeze(x0, -1)), -1) # b, l
             elif remasking == 'random':
@@ -101,6 +108,11 @@ def generate(model, prompt, steps=128, gen_length=128, block_length=128, tempera
                 _, select_index = torch.topk(confidence[j], k=num_transfer_tokens[j, i])
                 transfer_index[j, select_index] = True
             x[transfer_index] = x0[transfer_index]
+
+            if steps % 8 == 0:
+                print("At step", i, "of block", num_block)
+                answer = tokenizer.batch_decode(x[:, prompt.shape[1]:], skip_special_tokens=True)[0]
+                print(f"current guess: {answer}")
 
     return x
 
